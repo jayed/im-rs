@@ -266,7 +266,7 @@ extern crate serde;
 #[cfg(test)]
 extern crate serde_json;
 
-#[cfg(all(ref_arc, any(test, feature = "rayon")))]
+#[cfg(all(threadsafe, any(test, feature = "rayon")))]
 extern crate rayon;
 
 mod nodes;
