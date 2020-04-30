@@ -4,7 +4,7 @@
 
 //! An unordered map.
 //!
-//! An immutable hash map using [hash array mapped tries] [1].
+//! An immutable hash map using [hash array mapped tries][1].
 //!
 //! Most operations on this map are O(log<sub>x</sub> n) for a
 //! suitably high *x* that it should be nearly O(1) for most maps.
@@ -13,10 +13,8 @@
 //! [`Hash`][std::hash::Hash] and [`Eq`][std::cmp::Eq].
 //!
 //! Map entries will have a predictable order based on the hasher
-//! being used. Unless otherwise specified, all maps will use the
-//! default [`RandomState`][std::collections::hash_map::RandomState]
-//! hasher, which will produce consistent hashes for the duration of
-//! its lifetime, but not between restarts of your program.
+//! being used. Unless otherwise specified, this will be the standard
+//! [`RandomState`][std::collections::hash_map::RandomState] hasher.
 //!
 //! [1]: https://en.wikipedia.org/wiki/Hash_array_mapped_trie
 //! [std::cmp::Eq]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
@@ -37,7 +35,7 @@ use crate::nodes::hamt::{
     hash_key, Drain as NodeDrain, HashBits, HashValue, Iter as NodeIter, IterMut as NodeIterMut,
     Node,
 };
-use crate::util::Ref;
+use crate::util::{Pool, PoolRef, Ref};
 
 /// Construct a hash map from a sequence of key/value pairs.
 ///
@@ -78,6 +76,8 @@ macro_rules! hashmap {
     }};
 }
 
+def_pool!(HashMapPool<K,V>, Node<(K,V)>);
+
 /// An unordered map.
 ///
 /// An immutable hash map using [hash array mapped tries] [1].
@@ -89,31 +89,24 @@ macro_rules! hashmap {
 /// [`Hash`][std::hash::Hash] and [`Eq`][std::cmp::Eq].
 ///
 /// Map entries will have a predictable order based on the hasher
-/// being used. Unless otherwise specified, all maps will share an
-/// instance of the default
-/// [`RandomState`][std::collections::hash_map::RandomState] hasher,
-/// which will produce consistent hashes for the duration of its
-/// lifetime, but not between restarts of your program.
+/// being used. Unless otherwise specified, this will be the standard
+/// [`RandomState`][std::collections::hash_map::RandomState] hasher.
 ///
 /// [1]: https://en.wikipedia.org/wiki/Hash_array_mapped_trie
 /// [std::cmp::Eq]: https://doc.rust-lang.org/std/cmp/trait.Eq.html
 /// [std::hash::Hash]: https://doc.rust-lang.org/std/hash/trait.Hash.html
 /// [std::collections::hash_map::RandomState]: https://doc.rust-lang.org/std/collections/hash_map/struct.RandomState.html
 
-pub struct HashMap<K, V, S = RandomState>
-where
-    K: Clone,
-    V: Clone,
-{
+pub struct HashMap<K, V, S = RandomState> {
     size: usize,
-    root: Ref<Node<(K, V)>>,
+    pool: HashMapPool<K, V>,
+    root: PoolRef<Node<(K, V)>>,
     hasher: Ref<S>,
 }
 
 impl<K, V> HashValue for (K, V)
 where
-    K: Eq + Clone,
-    V: Clone,
+    K: Eq,
 {
     type Key = K;
 
@@ -126,11 +119,7 @@ where
     }
 }
 
-impl<K, V> HashMap<K, V, RandomState>
-where
-    K: Hash + Eq + Clone,
-    V: Clone,
-{
+impl<K, V> HashMap<K, V, RandomState> {
     /// Construct an empty hash map.
     #[inline]
     #[must_use]
@@ -138,18 +127,25 @@ where
         Self::default()
     }
 
-    /// Construct a hash map with a single mapping.
-    ///
-    /// This method has been deprecated; use [`unit`][unit] instead.
-    ///
-    /// [unit]: #method.unit
-    #[inline]
+    /// Construct an empty hash map using a specific memory pool.
+    #[cfg(feature = "pool")]
     #[must_use]
-    #[deprecated(since = "12.3.0", note = "renamed to `unit` for consistency")]
-    pub fn singleton(k: K, v: V) -> HashMap<K, V> {
-        Self::unit(k, v)
+    pub fn with_pool(pool: &HashMapPool<K, V>) -> Self {
+        let root = PoolRef::default(&pool.0);
+        Self {
+            size: 0,
+            hasher: Default::default(),
+            pool: pool.clone(),
+            root,
+        }
     }
+}
 
+impl<K, V> HashMap<K, V, RandomState>
+where
+    K: Hash + Eq + Clone,
+    V: Clone,
+{
     /// Construct a hash map with a single mapping.
     ///
     /// # Examples
@@ -157,13 +153,11 @@ where
     /// ```
     /// # #[macro_use] extern crate im;
     /// # use im::hashmap::HashMap;
-    /// # fn main() {
     /// let map = HashMap::unit(123, "onetwothree");
     /// assert_eq!(
     ///   map.get(&123),
     ///   Some(&"onetwothree")
     /// );
-    /// # }
     /// ```
     #[inline]
     #[must_use]
@@ -172,11 +166,7 @@ where
     }
 }
 
-impl<K, V, S> HashMap<K, V, S>
-where
-    K: Clone,
-    V: Clone,
-{
+impl<K, V, S> HashMap<K, V, S> {
     /// Test whether a hash map is empty.
     ///
     /// Time: O(1)
@@ -186,14 +176,12 @@ where
     /// ```
     /// # #[macro_use] extern crate im;
     /// # use im::hashmap::HashMap;
-    /// # fn main() {
     /// assert!(
     ///   !hashmap!{1 => 2}.is_empty()
     /// );
     /// assert!(
     ///   HashMap::<i32, i32>::new().is_empty()
     /// );
-    /// # }
     /// ```
     #[inline]
     #[must_use]
@@ -210,47 +198,38 @@ where
     /// ```
     /// # #[macro_use] extern crate im;
     /// # use im::hashmap::HashMap;
-    /// # fn main() {
     /// assert_eq!(3, hashmap!{
     ///   1 => 11,
     ///   2 => 22,
     ///   3 => 33
     /// }.len());
-    /// # }
     /// ```
     #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
         self.size
     }
-}
 
-impl<K, V, S> HashMap<K, V, S>
-where
-    K: Hash + Eq + Clone,
-    V: Clone,
-    S: BuildHasher,
-{
-    fn test_eq(&self, other: &Self) -> bool
-    where
-        V: PartialEq,
-    {
-        if self.len() != other.len() {
-            return false;
-        }
-        let mut seen = collections::HashSet::new();
-        for (key, value) in self.iter() {
-            if Some(value) != other.get(&key) {
-                return false;
-            }
-            seen.insert(key);
-        }
-        for key in other.keys() {
-            if !seen.contains(&key) {
-                return false;
-            }
-        }
-        true
+    /// Test whether two maps refer to the same content in memory.
+    ///
+    /// This is true if the two sides are references to the same map,
+    /// or if the two maps refer to the same root node.
+    ///
+    /// This would return true if you're comparing a map to itself, or
+    /// if you're comparing a map to a fresh clone of itself.
+    ///
+    /// Time: O(1)
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other) || PoolRef::ptr_eq(&self.root, &other.root)
+    }
+
+    /// Get a reference to the memory pool used by this map.
+    ///
+    /// Note that if you didn't specifically construct it with a pool, you'll
+    /// get back a reference to a pool of size 0.
+    #[cfg(feature = "pool")]
+    pub fn pool(&self) -> &HashMapPool<K, V> {
+        &self.pool
     }
 
     /// Construct an empty hash map using the provided hasher.
@@ -260,10 +239,29 @@ where
     where
         Ref<S>: From<RS>,
     {
+        let pool = HashMapPool::default();
+        let root = PoolRef::default(&pool.0);
         HashMap {
             size: 0,
-            root: Ref::new(Node::new()),
-            hasher: From::from(hasher),
+            hasher: hasher.into(),
+            pool,
+            root,
+        }
+    }
+
+    /// Construct an empty hash map using a specific memory pool and hasher.
+    #[cfg(feature = "pool")]
+    #[must_use]
+    pub fn with_pool_hasher<RS>(pool: &HashMapPool<K, V>, hasher: RS) -> Self
+    where
+        Ref<S>: From<RS>,
+    {
+        let root = PoolRef::default(&pool.0);
+        Self {
+            size: 0,
+            hasher: hasher.into(),
+            pool: pool.clone(),
+            root,
         }
     }
 
@@ -284,9 +282,12 @@ where
         K1: Hash + Eq + Clone,
         V1: Clone,
     {
+        let pool = HashMapPool::default();
+        let root = PoolRef::default(&pool.0);
         HashMap {
             size: 0,
-            root: Ref::new(Node::new()),
+            pool,
+            root,
             hasher: self.hasher.clone(),
         }
     }
@@ -306,22 +307,6 @@ where
         }
     }
 
-    /// Get a mutable iterator over the values of a hash map.
-    ///
-    /// Please note that the order is consistent between maps using
-    /// the same hasher, but no other ordering guarantee is offered.
-    /// Items will not come out in insertion order or sort order.
-    /// They will, however, come out in the same order every time for
-    /// the same map.
-    #[inline]
-    #[must_use]
-    pub fn iter_mut(&mut self) -> IterMut<'_, K, V> {
-        let root = Ref::make_mut(&mut self.root);
-        IterMut {
-            it: NodeIterMut::new(root, self.size),
-        }
-    }
-
     /// Get an iterator over a hash map's keys.
     ///
     /// Please note that the order is consistent between maps using
@@ -331,7 +316,7 @@ where
     /// the same map.
     #[inline]
     #[must_use]
-    pub fn keys(&self) -> Keys<K, V> {
+    pub fn keys(&self) -> Keys<'_, K, V> {
         Keys {
             it: NodeIter::new(&self.root, self.size),
         }
@@ -346,10 +331,62 @@ where
     /// the same map.
     #[inline]
     #[must_use]
-    pub fn values(&self) -> Values<K, V> {
+    pub fn values(&self) -> Values<'_, K, V> {
         Values {
             it: NodeIter::new(&self.root, self.size),
         }
+    }
+
+    /// Discard all elements from the map.
+    ///
+    /// This leaves you with an empty map, and all elements that
+    /// were previously inside it are dropped.
+    ///
+    /// Time: O(n)
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[macro_use] extern crate im;
+    /// # use im::HashMap;
+    /// let mut map = hashmap![1=>1, 2=>2, 3=>3];
+    /// map.clear();
+    /// assert!(map.is_empty());
+    /// ```
+    pub fn clear(&mut self) {
+        if !self.is_empty() {
+            self.root = PoolRef::default(&self.pool.0);
+            self.size = 0;
+        }
+    }
+}
+
+impl<K, V, S> HashMap<K, V, S>
+where
+    K: Hash + Eq,
+    S: BuildHasher,
+{
+    fn test_eq(&self, other: &Self) -> bool
+    where
+        K: Hash + Eq,
+        V: PartialEq,
+    {
+        if self.len() != other.len() {
+            return false;
+        }
+        let mut seen = collections::HashSet::new();
+        for (key, value) in self.iter() {
+            if Some(value) != other.get(&key) {
+                return false;
+            }
+            seen.insert(key);
+        }
+        for key in other.keys() {
+            if !seen.contains(&key) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Get the value for a key from a hash map.
@@ -361,13 +398,11 @@ where
     /// ```
     /// # #[macro_use] extern crate im;
     /// # use im::hashmap::HashMap;
-    /// # fn main() {
     /// let map = hashmap!{123 => "lol"};
     /// assert_eq!(
     ///   map.get(&123),
     ///   Some(&"lol")
     /// );
-    /// # }
     /// ```
     #[must_use]
     pub fn get<BK>(&self, key: &BK) -> Option<&V>
@@ -380,8 +415,7 @@ where
             .map(|&(_, ref v)| v)
     }
 
-    /// Get a mutable reference to the value for a key from a hash
-    /// map.
+    /// Get the key/value pair for a key from a hash map.
     ///
     /// Time: O(log n)
     ///
@@ -390,25 +424,21 @@ where
     /// ```
     /// # #[macro_use] extern crate im;
     /// # use im::hashmap::HashMap;
-    /// # fn main() {
     /// let map = hashmap!{123 => "lol"};
     /// assert_eq!(
-    ///   map.get(&123),
-    ///   Some(&"lol")
+    ///   map.get_key_value(&123),
+    ///   Some((&123, &"lol"))
     /// );
-    /// # }
     /// ```
     #[must_use]
-    pub fn get_mut<BK>(&mut self, key: &BK) -> Option<&mut V>
+    pub fn get_key_value<BK>(&self, key: &BK) -> Option<(&K, &V)>
     where
         BK: Hash + Eq + ?Sized,
         K: Borrow<BK>,
     {
-        let root = Ref::make_mut(&mut self.root);
-        match root.get_mut(hash_key(&*self.hasher, key), 0, key) {
-            None => None,
-            Some(&mut (_, ref mut value)) => Some(value),
-        }
+        self.root
+            .get(hash_key(&*self.hasher, key), 0, key)
+            .map(|&(ref k, ref v)| (k, v))
     }
 
     /// Test for the presence of a key in a hash map.
@@ -420,7 +450,6 @@ where
     /// ```
     /// # #[macro_use] extern crate im;
     /// # use im::hashmap::HashMap;
-    /// # fn main() {
     /// let map = hashmap!{123 => "lol"};
     /// assert!(
     ///   map.contains_key(&123)
@@ -428,7 +457,6 @@ where
     /// assert!(
     ///   !map.contains_key(&321)
     /// );
-    /// # }
     /// ```
     #[inline]
     #[must_use]
@@ -438,6 +466,150 @@ where
         K: Borrow<BK>,
     {
         self.get(k).is_some()
+    }
+
+    /// Test whether a map is a submap of another map, meaning that
+    /// all keys in our map must also be in the other map, with the
+    /// same values.
+    ///
+    /// Use the provided function to decide whether values are equal.
+    ///
+    /// Time: O(n log n)
+    #[must_use]
+    pub fn is_submap_by<B, RM, F>(&self, other: RM, mut cmp: F) -> bool
+    where
+        F: FnMut(&V, &B) -> bool,
+        RM: Borrow<HashMap<K, B, S>>,
+    {
+        self.iter()
+            .all(|(k, v)| other.borrow().get(k).map(|ov| cmp(v, ov)).unwrap_or(false))
+    }
+
+    /// Test whether a map is a proper submap of another map, meaning
+    /// that all keys in our map must also be in the other map, with
+    /// the same values. To be a proper submap, ours must also contain
+    /// fewer keys than the other map.
+    ///
+    /// Use the provided function to decide whether values are equal.
+    ///
+    /// Time: O(n log n)
+    #[must_use]
+    pub fn is_proper_submap_by<B, RM, F>(&self, other: RM, cmp: F) -> bool
+    where
+        F: FnMut(&V, &B) -> bool,
+        RM: Borrow<HashMap<K, B, S>>,
+    {
+        self.len() != other.borrow().len() && self.is_submap_by(other, cmp)
+    }
+
+    /// Test whether a map is a submap of another map, meaning that
+    /// all keys in our map must also be in the other map, with the
+    /// same values.
+    ///
+    /// Time: O(n log n)
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[macro_use] extern crate im;
+    /// # use im::hashmap::HashMap;
+    /// let map1 = hashmap!{1 => 1, 2 => 2};
+    /// let map2 = hashmap!{1 => 1, 2 => 2, 3 => 3};
+    /// assert!(map1.is_submap(map2));
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn is_submap<RM>(&self, other: RM) -> bool
+    where
+        V: PartialEq,
+        RM: Borrow<Self>,
+    {
+        self.is_submap_by(other.borrow(), PartialEq::eq)
+    }
+
+    /// Test whether a map is a proper submap of another map, meaning
+    /// that all keys in our map must also be in the other map, with
+    /// the same values. To be a proper submap, ours must also contain
+    /// fewer keys than the other map.
+    ///
+    /// Time: O(n log n)
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[macro_use] extern crate im;
+    /// # use im::hashmap::HashMap;
+    /// let map1 = hashmap!{1 => 1, 2 => 2};
+    /// let map2 = hashmap!{1 => 1, 2 => 2, 3 => 3};
+    /// assert!(map1.is_proper_submap(map2));
+    ///
+    /// let map3 = hashmap!{1 => 1, 2 => 2};
+    /// let map4 = hashmap!{1 => 1, 2 => 2};
+    /// assert!(!map3.is_proper_submap(map4));
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn is_proper_submap<RM>(&self, other: RM) -> bool
+    where
+        V: PartialEq,
+        RM: Borrow<Self>,
+    {
+        self.is_proper_submap_by(other.borrow(), PartialEq::eq)
+    }
+}
+
+impl<K, V, S> HashMap<K, V, S>
+where
+    K: Hash + Eq + Clone,
+    V: Clone,
+    S: BuildHasher,
+{
+    /// Get a mutable iterator over the values of a hash map.
+    ///
+    /// Please note that the order is consistent between maps using
+    /// the same hasher, but no other ordering guarantee is offered.
+    /// Items will not come out in insertion order or sort order.
+    /// They will, however, come out in the same order every time for
+    /// the same map.
+    #[inline]
+    #[must_use]
+    pub fn iter_mut(&mut self) -> IterMut<'_, K, V> {
+        let root = PoolRef::make_mut(&self.pool.0, &mut self.root);
+        IterMut {
+            it: NodeIterMut::new(&self.pool.0, root, self.size),
+        }
+    }
+
+    /// Get a mutable reference to the value for a key from a hash
+    /// map.
+    ///
+    /// Time: O(log n)
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[macro_use] extern crate im;
+    /// # use im::hashmap::HashMap;
+    /// let mut map = hashmap!{123 => "lol"};
+    /// if let Some(value) = map.get_mut(&123) {
+    ///     *value = "omg";
+    /// }
+    /// assert_eq!(
+    ///   map.get(&123),
+    ///   Some(&"omg")
+    /// );
+    /// ```
+    #[must_use]
+    pub fn get_mut<BK>(&mut self, key: &BK) -> Option<&mut V>
+    where
+        BK: Hash + Eq + ?Sized,
+        K: Borrow<BK>,
+    {
+        let root = PoolRef::make_mut(&self.pool.0, &mut self.root);
+        match root.get_mut(&self.pool.0, hash_key(&*self.hasher, key), 0, key) {
+            None => None,
+            Some(&mut (_, ref mut value)) => Some(value),
+        }
     }
 
     /// Insert a key/value mapping into a map.
@@ -452,7 +624,6 @@ where
     /// ```
     /// # #[macro_use] extern crate im;
     /// # use im::hashmap::HashMap;
-    /// # fn main() {
     /// let mut map = hashmap!{};
     /// map.insert(123, "123");
     /// map.insert(456, "456");
@@ -460,13 +631,12 @@ where
     ///   map,
     ///   hashmap!{123 => "123", 456 => "456"}
     /// );
-    /// # }
     /// ```
     #[inline]
     pub fn insert(&mut self, k: K, v: V) -> Option<V> {
         let hash = hash_key(&*self.hasher, &k);
-        let root = Ref::make_mut(&mut self.root);
-        let result = root.insert(hash, 0, (k, v));
+        let root = PoolRef::make_mut(&self.pool.0, &mut self.root);
+        let result = root.insert(&self.pool.0, hash, 0, (k, v));
         if result.is_none() {
             self.size += 1;
         }
@@ -487,13 +657,11 @@ where
     /// ```
     /// # #[macro_use] extern crate im;
     /// # use im::hashmap::HashMap;
-    /// # fn main() {
     /// let mut map = hashmap!{123 => "123", 456 => "456"};
     /// assert_eq!(Some("123"), map.remove(&123));
     /// assert_eq!(Some("456"), map.remove(&456));
     /// assert_eq!(None, map.remove(&789));
     /// assert!(map.is_empty());
-    /// # }
     /// ```
     pub fn remove<BK>(&mut self, k: &BK) -> Option<V>
     where
@@ -513,50 +681,23 @@ where
     /// ```
     /// # #[macro_use] extern crate im;
     /// # use im::hashmap::HashMap;
-    /// # fn main() {
     /// let mut map = hashmap!{123 => "123", 456 => "456"};
     /// assert_eq!(Some((123, "123")), map.remove_with_key(&123));
     /// assert_eq!(Some((456, "456")), map.remove_with_key(&456));
     /// assert_eq!(None, map.remove_with_key(&789));
     /// assert!(map.is_empty());
-    /// # }
     /// ```
     pub fn remove_with_key<BK>(&mut self, k: &BK) -> Option<(K, V)>
     where
         BK: Hash + Eq + ?Sized,
         K: Borrow<BK>,
     {
-        let root = Ref::make_mut(&mut self.root);
-        let result = root.remove(hash_key(&*self.hasher, k), 0, k);
+        let root = PoolRef::make_mut(&self.pool.0, &mut self.root);
+        let result = root.remove(&self.pool.0, hash_key(&*self.hasher, k), 0, k);
         if result.is_some() {
             self.size -= 1;
         }
         result
-    }
-
-    /// Discard all elements from the map.
-    ///
-    /// This leaves you with an empty map, and all elements that
-    /// were previously inside it are dropped.
-    ///
-    /// Time: O(n)
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # #[macro_use] extern crate im;
-    /// # use im::HashMap;
-    /// # fn main() {
-    /// let mut map = hashmap![1=>1, 2=>2, 3=>3];
-    /// map.clear();
-    /// assert!(map.is_empty());
-    /// # }
-    /// ```
-    pub fn clear(&mut self) {
-        if !self.is_empty() {
-            self.root = Default::default();
-            self.size = 0;
-        }
     }
 
     /// Get the [`Entry`][Entry] for a key in the map for in-place manipulation.
@@ -594,13 +735,11 @@ where
     /// ```
     /// # #[macro_use] extern crate im;
     /// # use im::hashmap::HashMap;
-    /// # fn main() {
     /// let map = hashmap!{};
     /// assert_eq!(
     ///   map.update(123, "123"),
     ///   hashmap!{123 => "123"}
     /// );
-    /// # }
     /// ```
     #[inline]
     #[must_use]
@@ -718,6 +857,38 @@ where
         }
     }
 
+    /// Filter out values from a map which don't satisfy a predicate.
+    ///
+    /// This is slightly more efficient than filtering using an
+    /// iterator, in that it doesn't need to rehash the retained
+    /// values, but it still needs to reconstruct the entire tree
+    /// structure of the map.
+    ///
+    /// Time: O(n log n)
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[macro_use] extern crate im;
+    /// # use im::HashMap;
+    /// let mut map = hashmap!{1 => 1, 2 => 2, 3 => 3};
+    /// map.retain(|k, v| *k > 1);
+    /// let expected = hashmap!{2 => 2, 3 => 3};
+    /// assert_eq!(expected, map);
+    /// ```
+    pub fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&K, &V) -> bool,
+    {
+        let old_root = self.root.clone();
+        let root = PoolRef::make_mut(&self.pool.0, &mut self.root);
+        for ((key, value), hash) in NodeIter::new(&old_root, self.size) {
+            if !f(key, value) && root.remove(&self.pool.0, hash, 0, key).is_some() {
+                self.size -= 1;
+            }
+        }
+    }
+
     /// Remove a key/value pair from a map, if it exists, and return
     /// the removed value as well as the updated map.
     ///
@@ -755,12 +926,10 @@ where
     /// ```
     /// # #[macro_use] extern crate im;
     /// # use im::hashmap::HashMap;
-    /// # fn main() {
     /// let map1 = hashmap!{1 => 1, 3 => 3};
     /// let map2 = hashmap!{2 => 2, 3 => 4};
     /// let expected = hashmap!{1 => 1, 2 => 2, 3 => 3};
     /// assert_eq!(expected, map1.union(map2));
-    /// # }
     /// ```
     #[must_use]
     pub fn union(mut self, other: Self) -> Self {
@@ -804,7 +973,6 @@ where
     /// ```
     /// # #[macro_use] extern crate im;
     /// # use im::hashmap::HashMap;
-    /// # fn main() {
     /// let map1 = hashmap!{1 => 1, 3 => 4};
     /// let map2 = hashmap!{2 => 2, 3 => 5};
     /// let expected = hashmap!{1 => 1, 2 => 2, 3 => 9};
@@ -812,7 +980,6 @@ where
     ///     map2,
     ///     |key, left, right| left + right
     /// ));
-    /// # }
     /// ```
     #[must_use]
     pub fn union_with_key<F>(mut self, other: Self, mut f: F) -> Self
@@ -843,12 +1010,10 @@ where
     /// ```
     /// # #[macro_use] extern crate im;
     /// # use im::hashmap::HashMap;
-    /// # fn main() {
     /// let map1 = hashmap!{1 => 1, 3 => 3};
     /// let map2 = hashmap!{2 => 2};
     /// let expected = hashmap!{1 => 1, 2 => 2, 3 => 3};
     /// assert_eq!(expected, HashMap::unions(vec![map1, map2]));
-    /// # }
     /// ```
     #[must_use]
     pub fn unions<I>(i: I) -> Self
@@ -902,7 +1067,33 @@ where
             .fold(Self::default(), |a, b| a.union_with_key(b, &f))
     }
 
-    /// Construct the difference between two maps by discarding keys
+    /// Construct the symmetric difference between two maps by discarding keys
+    /// which occur in both maps.
+    ///
+    /// This is an alias for the
+    /// [`symmetric_difference`][symmetric_difference] method.
+    ///
+    /// Time: O(n log n)
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[macro_use] extern crate im;
+    /// # use im::hashmap::HashMap;
+    /// let map1 = hashmap!{1 => 1, 3 => 4};
+    /// let map2 = hashmap!{2 => 2, 3 => 5};
+    /// let expected = hashmap!{1 => 1, 2 => 2};
+    /// assert_eq!(expected, map1.difference(map2));
+    /// ```
+    ///
+    /// [symmetric_difference]: #method.symmetric_difference
+    #[inline]
+    #[must_use]
+    pub fn difference(self, other: Self) -> Self {
+        self.symmetric_difference(other)
+    }
+
+    /// Construct the symmetric difference between two maps by discarding keys
     /// which occur in both maps.
     ///
     /// Time: O(n log n)
@@ -912,33 +1103,82 @@ where
     /// ```
     /// # #[macro_use] extern crate im;
     /// # use im::hashmap::HashMap;
-    /// # fn main() {
     /// let map1 = hashmap!{1 => 1, 3 => 4};
     /// let map2 = hashmap!{2 => 2, 3 => 5};
     /// let expected = hashmap!{1 => 1, 2 => 2};
-    /// assert_eq!(expected, map1.difference(map2));
-    /// # }
+    /// assert_eq!(expected, map1.symmetric_difference(map2));
     /// ```
     #[inline]
     #[must_use]
-    pub fn difference(self, other: Self) -> Self {
-        self.difference_with_key(other, |_, _, _| None)
+    pub fn symmetric_difference(self, other: Self) -> Self {
+        self.symmetric_difference_with_key(other, |_, _, _| None)
     }
 
-    /// Construct the difference between two maps by using a function
+    /// Construct the symmetric difference between two maps by using a function
+    /// to decide what to do if a key occurs in both.
+    ///
+    /// This is an alias for the
+    /// [`symmetric_difference_with`][symmetric_difference_with] method.
+    ///
+    /// Time: O(n log n)
+    ///
+    /// [symmetric_difference_with]: #method.symmetric_difference_with
+    #[inline]
+    #[must_use]
+    pub fn difference_with<F>(self, other: Self, f: F) -> Self
+    where
+        F: FnMut(V, V) -> Option<V>,
+    {
+        self.symmetric_difference_with(other, f)
+    }
+
+    /// Construct the symmetric difference between two maps by using a function
     /// to decide what to do if a key occurs in both.
     ///
     /// Time: O(n log n)
     #[inline]
     #[must_use]
-    pub fn difference_with<F>(self, other: Self, mut f: F) -> Self
+    pub fn symmetric_difference_with<F>(self, other: Self, mut f: F) -> Self
     where
         F: FnMut(V, V) -> Option<V>,
     {
-        self.difference_with_key(other, |_, a, b| f(a, b))
+        self.symmetric_difference_with_key(other, |_, a, b| f(a, b))
     }
 
-    /// Construct the difference between two maps by using a function
+    /// Construct the symmetric difference between two maps by using a function
+    /// to decide what to do if a key occurs in both. The function
+    /// receives the key as well as both values.
+    ///
+    /// This is an alias for the
+    /// [`symmetric_difference_with`_key][symmetric_difference_with_key]
+    /// method.
+    ///
+    /// Time: O(n log n)
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[macro_use] extern crate im;
+    /// # use im::hashmap::HashMap;
+    /// let map1 = hashmap!{1 => 1, 3 => 4};
+    /// let map2 = hashmap!{2 => 2, 3 => 5};
+    /// let expected = hashmap!{1 => 1, 2 => 2, 3 => 9};
+    /// assert_eq!(expected, map1.difference_with_key(
+    ///     map2,
+    ///     |key, left, right| Some(left + right)
+    /// ));
+    /// ```
+    ///
+    /// [symmetric_difference_with_key]: #method.symmetric_difference_with_key
+    #[must_use]
+    pub fn difference_with_key<F>(self, other: Self, f: F) -> Self
+    where
+        F: FnMut(&K, V, V) -> Option<V>,
+    {
+        self.symmetric_difference_with_key(other, f)
+    }
+
+    /// Construct the symmetric difference between two maps by using a function
     /// to decide what to do if a key occurs in both. The function
     /// receives the key as well as both values.
     ///
@@ -949,18 +1189,16 @@ where
     /// ```
     /// # #[macro_use] extern crate im;
     /// # use im::hashmap::HashMap;
-    /// # fn main() {
     /// let map1 = hashmap!{1 => 1, 3 => 4};
     /// let map2 = hashmap!{2 => 2, 3 => 5};
     /// let expected = hashmap!{1 => 1, 2 => 2, 3 => 9};
-    /// assert_eq!(expected, map1.difference_with_key(
+    /// assert_eq!(expected, map1.symmetric_difference_with_key(
     ///     map2,
     ///     |key, left, right| Some(left + right)
     /// ));
-    /// # }
     /// ```
     #[must_use]
-    pub fn difference_with_key<F>(mut self, other: Self, mut f: F) -> Self
+    pub fn symmetric_difference_with_key<F>(mut self, other: Self, mut f: F) -> Self
     where
         F: FnMut(&K, V, V) -> Option<V>,
     {
@@ -980,6 +1218,30 @@ where
         out.union(self)
     }
 
+    /// Construct the relative complement between two maps by discarding keys
+    /// which occur in `other`.
+    ///
+    /// Time: O(m log n) where m is the size of the other map
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[macro_use] extern crate im;
+    /// # use im::ordmap::OrdMap;
+    /// let map1 = ordmap!{1 => 1, 3 => 4};
+    /// let map2 = ordmap!{2 => 2, 3 => 5};
+    /// let expected = ordmap!{1 => 1};
+    /// assert_eq!(expected, map1.relative_complement(map2));
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn relative_complement(mut self, other: Self) -> Self {
+        for (key, _) in other {
+            let _ = self.remove(&key);
+        }
+        self
+    }
+
     /// Construct the intersection of two maps, keeping the values
     /// from the current map.
     ///
@@ -990,12 +1252,10 @@ where
     /// ```
     /// # #[macro_use] extern crate im;
     /// # use im::hashmap::HashMap;
-    /// # fn main() {
     /// let map1 = hashmap!{1 => 1, 2 => 2};
     /// let map2 = hashmap!{2 => 3, 3 => 4};
     /// let expected = hashmap!{2 => 2};
     /// assert_eq!(expected, map1.intersection(map2));
-    /// # }
     /// ```
     #[inline]
     #[must_use]
@@ -1030,7 +1290,6 @@ where
     /// ```
     /// # #[macro_use] extern crate im;
     /// # use im::hashmap::HashMap;
-    /// # fn main() {
     /// let map1 = hashmap!{1 => 1, 2 => 2};
     /// let map2 = hashmap!{2 => 3, 3 => 4};
     /// let expected = hashmap!{2 => 5};
@@ -1038,7 +1297,6 @@ where
     ///     map2,
     ///     |key, left, right| left + right
     /// ));
-    /// # }
     /// ```
     #[must_use]
     pub fn intersection_with_key<B, C, F>(
@@ -1063,101 +1321,6 @@ where
         }
         out
     }
-
-    /// Test whether a map is a submap of another map, meaning that
-    /// all keys in our map must also be in the other map, with the
-    /// same values.
-    ///
-    /// Use the provided function to decide whether values are equal.
-    ///
-    /// Time: O(n log n)
-    #[must_use]
-    pub fn is_submap_by<B, RM, F>(&self, other: RM, mut cmp: F) -> bool
-    where
-        B: Clone,
-        F: FnMut(&V, &B) -> bool,
-        RM: Borrow<HashMap<K, B, S>>,
-    {
-        self.iter()
-            .all(|(k, v)| other.borrow().get(k).map(|ov| cmp(v, ov)).unwrap_or(false))
-    }
-
-    /// Test whether a map is a proper submap of another map, meaning
-    /// that all keys in our map must also be in the other map, with
-    /// the same values. To be a proper submap, ours must also contain
-    /// fewer keys than the other map.
-    ///
-    /// Use the provided function to decide whether values are equal.
-    ///
-    /// Time: O(n log n)
-    #[must_use]
-    pub fn is_proper_submap_by<B, RM, F>(&self, other: RM, cmp: F) -> bool
-    where
-        B: Clone,
-        F: FnMut(&V, &B) -> bool,
-        RM: Borrow<HashMap<K, B, S>>,
-    {
-        self.len() != other.borrow().len() && self.is_submap_by(other, cmp)
-    }
-
-    /// Test whether a map is a submap of another map, meaning that
-    /// all keys in our map must also be in the other map, with the
-    /// same values.
-    ///
-    /// Time: O(n log n)
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # #[macro_use] extern crate im;
-    /// # use im::hashmap::HashMap;
-    /// # fn main() {
-    /// let map1 = hashmap!{1 => 1, 2 => 2};
-    /// let map2 = hashmap!{1 => 1, 2 => 2, 3 => 3};
-    /// assert!(map1.is_submap(map2));
-    /// # }
-    /// ```
-    #[inline]
-    #[must_use]
-    pub fn is_submap<RM>(&self, other: RM) -> bool
-    where
-        V: PartialEq,
-        RM: Borrow<Self>,
-    {
-        self.is_submap_by(other.borrow(), PartialEq::eq)
-    }
-
-    /// Test whether a map is a proper submap of another map, meaning
-    /// that all keys in our map must also be in the other map, with
-    /// the same values. To be a proper submap, ours must also contain
-    /// fewer keys than the other map.
-    ///
-    /// Time: O(n log n)
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # #[macro_use] extern crate im;
-    /// # use im::hashmap::HashMap;
-    /// # fn main() {
-    /// let map1 = hashmap!{1 => 1, 2 => 2};
-    /// let map2 = hashmap!{1 => 1, 2 => 2, 3 => 3};
-    /// assert!(map1.is_proper_submap(map2));
-    ///
-    /// let map3 = hashmap!{1 => 1, 2 => 2};
-    /// let map4 = hashmap!{1 => 1, 2 => 2};
-    /// assert!(!map3.is_proper_submap(map4));
-    /// # }
-    /// ```
-    #[inline]
-    #[must_use]
-    pub fn is_proper_submap<RM>(&self, other: RM) -> bool
-    where
-        V: PartialEq,
-        RM: Borrow<Self>,
-    {
-        self.is_proper_submap_by(other.borrow(), PartialEq::eq)
-    }
 }
 
 // Entries
@@ -1175,11 +1338,13 @@ where
 /// generally perform similarly otherwise.
 pub enum Entry<'a, K, V, S>
 where
-    K: 'a + Hash + Eq + Clone,
-    V: 'a + Clone,
-    S: 'a + BuildHasher,
+    K: Hash + Eq + Clone,
+    V: Clone,
+    S: BuildHasher,
 {
+    /// An entry which exists in the map.
     Occupied(OccupiedEntry<'a, K, V, S>),
+    /// An entry which doesn't exist in the map.
     Vacant(VacantEntry<'a, K, V, S>),
 }
 
@@ -1243,9 +1408,9 @@ where
 /// An entry for a mapping that already exists in the map.
 pub struct OccupiedEntry<'a, K, V, S>
 where
-    K: 'a + Hash + Eq + Clone,
-    V: 'a + Clone,
-    S: 'a + BuildHasher,
+    K: Hash + Eq + Clone,
+    V: Clone,
+    S: BuildHasher,
 {
     map: &'a mut HashMap<K, V, S>,
     hash: HashBits,
@@ -1266,8 +1431,8 @@ where
 
     /// Remove this entry from the map and return the removed mapping.
     pub fn remove_entry(self) -> (K, V) {
-        let root = Ref::make_mut(&mut self.map.root);
-        let result = root.remove(self.hash, 0, &self.key);
+        let root = PoolRef::make_mut(&self.map.pool.0, &mut self.map.root);
+        let result = root.remove(&self.map.pool.0, self.hash, 0, &self.key);
         self.map.size -= 1;
         result.unwrap()
     }
@@ -1281,15 +1446,21 @@ where
     /// Get a mutable reference to the current value.
     #[must_use]
     pub fn get_mut(&mut self) -> &mut V {
-        let root = Ref::make_mut(&mut self.map.root);
-        &mut root.get_mut(self.hash, 0, &self.key).unwrap().1
+        let root = PoolRef::make_mut(&self.map.pool.0, &mut self.map.root);
+        &mut root
+            .get_mut(&self.map.pool.0, self.hash, 0, &self.key)
+            .unwrap()
+            .1
     }
 
     /// Convert this entry into a mutable reference.
     #[must_use]
     pub fn into_mut(self) -> &'a mut V {
-        let root = Ref::make_mut(&mut self.map.root);
-        &mut root.get_mut(self.hash, 0, &self.key).unwrap().1
+        let root = PoolRef::make_mut(&self.map.pool.0, &mut self.map.root);
+        &mut root
+            .get_mut(&self.map.pool.0, self.hash, 0, &self.key)
+            .unwrap()
+            .1
     }
 
     /// Overwrite the current value.
@@ -1306,9 +1477,9 @@ where
 /// An entry for a mapping that does not already exist in the map.
 pub struct VacantEntry<'a, K, V, S>
 where
-    K: 'a + Hash + Eq + Clone,
-    V: 'a + Clone,
-    S: 'a + BuildHasher,
+    K: Hash + Eq + Clone,
+    V: Clone,
+    S: BuildHasher,
 {
     map: &'a mut HashMap<K, V, S>,
     hash: HashBits,
@@ -1335,16 +1506,19 @@ where
 
     /// Insert a value into this entry.
     pub fn insert(self, value: V) -> &'a mut V {
-        let root = Ref::make_mut(&mut self.map.root);
+        let root = PoolRef::make_mut(&self.map.pool.0, &mut self.map.root);
         if root
-            .insert(self.hash, 0, (self.key.clone(), value))
+            .insert(&self.map.pool.0, self.hash, 0, (self.key.clone(), value))
             .is_none()
         {
             self.map.size += 1;
         }
         // TODO it's unfortunate that we need to look up the key again
         // here to get the mut ref.
-        &mut root.get_mut(self.hash, 0, &self.key).unwrap().1
+        &mut root
+            .get_mut(&self.map.pool.0, self.hash, 0, &self.key)
+            .unwrap()
+            .1
     }
 }
 
@@ -1355,10 +1529,14 @@ where
     K: Clone,
     V: Clone,
 {
+    /// Clone a map.
+    ///
+    /// Time: O(1)
     #[inline]
     fn clone(&self) -> Self {
         HashMap {
             root: self.root.clone(),
+            pool: self.pool.clone(),
             size: self.size,
             hasher: self.hasher.clone(),
         }
@@ -1368,8 +1546,8 @@ where
 #[cfg(not(has_specialisation))]
 impl<K, V, S> PartialEq for HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone,
-    V: PartialEq + Clone,
+    K: Hash + Eq,
+    V: PartialEq,
     S: BuildHasher,
 {
     fn eq(&self, other: &Self) -> bool {
@@ -1380,8 +1558,8 @@ where
 #[cfg(has_specialisation)]
 impl<K, V, S> PartialEq for HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone,
-    V: PartialEq + Clone,
+    K: Hash + Eq,
+    V: PartialEq,
     S: BuildHasher,
 {
     default fn eq(&self, other: &Self) -> bool {
@@ -1392,12 +1570,12 @@ where
 #[cfg(has_specialisation)]
 impl<K, V, S> PartialEq for HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone,
-    V: Eq + Clone,
+    K: Hash + Eq,
+    V: Eq,
     S: BuildHasher,
 {
     fn eq(&self, other: &Self) -> bool {
-        if Ref::ptr_eq(&self.root, &other.root) {
+        if PoolRef::ptr_eq(&self.root, &other.root) {
             return true;
         }
         self.test_eq(other)
@@ -1406,8 +1584,8 @@ where
 
 impl<K, V, S> Eq for HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone,
-    V: Eq + Clone,
+    K: Hash + Eq,
+    V: Eq,
     S: BuildHasher,
 {
 }
@@ -1422,9 +1600,7 @@ where
         if Ref::ptr_eq(&self.hasher, &other.hasher) {
             return self.iter().partial_cmp(other.iter());
         }
-        let m1: ::std::collections::HashMap<K, V> = self.iter().cloned().collect();
-        let m2: ::std::collections::HashMap<K, V> = other.iter().cloned().collect();
-        m1.iter().partial_cmp(m2.iter())
+        self.iter().partial_cmp(other.iter())
     }
 }
 
@@ -1438,16 +1614,14 @@ where
         if Ref::ptr_eq(&self.hasher, &other.hasher) {
             return self.iter().cmp(other.iter());
         }
-        let m1: ::std::collections::HashMap<K, V> = self.iter().cloned().collect();
-        let m2: ::std::collections::HashMap<K, V> = other.iter().cloned().collect();
-        m1.iter().cmp(m2.iter())
+        self.iter().cmp(other.iter())
     }
 }
 
 impl<K, V, S> Hash for HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone,
-    V: Hash + Clone,
+    K: Hash + Eq,
+    V: Hash,
     S: BuildHasher,
 {
     fn hash<H>(&self, state: &mut H)
@@ -1462,15 +1636,16 @@ where
 
 impl<K, V, S> Default for HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone,
-    V: Clone,
     S: BuildHasher + Default,
 {
     #[inline]
     fn default() -> Self {
+        let pool = HashMapPool::default();
+        let root = PoolRef::default(&pool.0);
         HashMap {
             size: 0,
-            root: Ref::new(Node::new()),
+            pool,
+            root,
             hasher: Ref::<S>::default(),
         }
     }
@@ -1535,8 +1710,7 @@ where
 impl<'a, BK, K, V, S> Index<&'a BK> for HashMap<K, V, S>
 where
     BK: Hash + Eq + ?Sized,
-    K: Hash + Eq + Clone + Borrow<BK>,
-    V: Clone,
+    K: Hash + Eq + Borrow<BK>,
     S: BuildHasher,
 {
     type Output = V;
@@ -1557,8 +1731,8 @@ where
     S: BuildHasher,
 {
     fn index_mut(&mut self, key: &BK) -> &mut Self::Output {
-        let root = Ref::make_mut(&mut self.root);
-        match root.get_mut(hash_key(&*self.hasher, key), 0, key) {
+        let root = PoolRef::make_mut(&self.pool.0, &mut self.root);
+        match root.get_mut(&self.pool.0, hash_key(&*self.hasher, key), 0, key) {
             None => panic!("HashMap::index_mut: invalid key"),
             Some(&mut (_, ref mut value)) => value,
         }
@@ -1568,11 +1742,11 @@ where
 #[cfg(not(has_specialisation))]
 impl<K, V, S> Debug for HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone + Debug,
-    V: Debug + Clone,
+    K: Hash + Eq + Debug,
+    V: Debug,
     S: BuildHasher,
 {
-    fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
         let mut d = f.debug_map();
         for (k, v) in self {
             d.entry(k, v);
@@ -1584,11 +1758,11 @@ where
 #[cfg(has_specialisation)]
 impl<K, V, S> Debug for HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone + Debug,
-    V: Debug + Clone,
+    K: Hash + Eq + Debug,
+    V: Debug,
     S: BuildHasher,
 {
-    default fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
+    default fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
         let mut d = f.debug_map();
         for (k, v) in self {
             d.entry(k, v);
@@ -1600,11 +1774,11 @@ where
 #[cfg(has_specialisation)]
 impl<K, V, S> Debug for HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone + Ord + Debug,
-    V: Debug + Clone,
+    K: Hash + Eq + Ord + Debug,
+    V: Debug,
     S: BuildHasher,
 {
-    fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
         let mut keys = collections::BTreeSet::new();
         keys.extend(self.keys());
         let mut d = f.debug_map();
@@ -1617,16 +1791,16 @@ where
 
 // // Iterators
 
-// An iterator over the elements of a map.
-pub struct Iter<'a, K: 'a, V: 'a> {
+/// An iterator over the elements of a map.
+pub struct Iter<'a, K, V> {
     it: NodeIter<'a, (K, V)>,
 }
 
 impl<'a, K, V> Iterator for Iter<'a, K, V> {
-    type Item = &'a (K, V);
+    type Item = (&'a K, &'a V);
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.it.next().map(|(p, _)| p)
+        self.it.next().map(|((k, v), _)| (k, v))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -1638,8 +1812,8 @@ impl<'a, K, V> ExactSizeIterator for Iter<'a, K, V> {}
 
 impl<'a, K, V> FusedIterator for Iter<'a, K, V> {}
 
-// A mutable iterator over the values of a map.
-pub struct IterMut<'a, K: 'a, V: 'a>
+/// A mutable iterator over the elements of a map.
+pub struct IterMut<'a, K, V>
 where
     K: Clone,
     V: Clone,
@@ -1652,10 +1826,10 @@ where
     K: Clone,
     V: Clone,
 {
-    type Item = &'a mut V;
+    type Item = (&'a K, &'a mut V);
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.it.next().map(|(entry, _)| &mut entry.1)
+        self.it.next().map(|((k, v), _)| (&*k, v))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -1677,14 +1851,14 @@ where
 {
 }
 
-// A consuming iterator over the elements of a map.
+/// A consuming iterator over the elements of a map.
 pub struct ConsumingIter<A: HashValue> {
     it: NodeDrain<A>,
 }
 
 impl<A> Iterator for ConsumingIter<A>
 where
-    A: HashValue,
+    A: HashValue + Clone,
 {
     type Item = A;
 
@@ -1697,12 +1871,12 @@ where
     }
 }
 
-impl<A> ExactSizeIterator for ConsumingIter<A> where A: HashValue {}
+impl<A> ExactSizeIterator for ConsumingIter<A> where A: HashValue + Clone {}
 
-impl<A> FusedIterator for ConsumingIter<A> where A: HashValue {}
+impl<A> FusedIterator for ConsumingIter<A> where A: HashValue + Clone {}
 
-// An iterator over the keys of a map.
-pub struct Keys<'a, K: 'a, V: 'a> {
+/// An iterator over the keys of a map.
+pub struct Keys<'a, K, V> {
     it: NodeIter<'a, (K, V)>,
 }
 
@@ -1722,8 +1896,8 @@ impl<'a, K, V> ExactSizeIterator for Keys<'a, K, V> {}
 
 impl<'a, K, V> FusedIterator for Keys<'a, K, V> {}
 
-// An iterator over the values of a map.
-pub struct Values<'a, K: 'a, V: 'a> {
+/// An iterator over the values of a map.
+pub struct Values<'a, K, V> {
     it: NodeIter<'a, (K, V)>,
 }
 
@@ -1745,11 +1919,10 @@ impl<'a, K, V> FusedIterator for Values<'a, K, V> {}
 
 impl<'a, K, V, S> IntoIterator for &'a HashMap<K, V, S>
 where
-    K: Hash + Eq + Clone,
-    V: Clone,
+    K: Hash + Eq,
     S: BuildHasher,
 {
-    type Item = &'a (K, V);
+    type Item = (&'a K, &'a V);
     type IntoIter = Iter<'a, K, V>;
 
     #[inline]
@@ -1770,12 +1943,12 @@ where
     #[inline]
     fn into_iter(self) -> Self::IntoIter {
         ConsumingIter {
-            it: NodeDrain::new(self.root, self.size),
+            it: NodeDrain::new(&self.pool.0, self.root, self.size),
         }
     }
 }
 
-// // Conversions
+// Conversions
 
 impl<K, V, S> FromIterator<(K, V)> for HashMap<K, V, S>
 where
@@ -1795,11 +1968,7 @@ where
     }
 }
 
-impl<K, V, S> AsRef<HashMap<K, V, S>> for HashMap<K, V, S>
-where
-    K: Clone,
-    V: Clone,
-{
+impl<K, V, S> AsRef<HashMap<K, V, S>> for HashMap<K, V, S> {
     #[inline]
     fn as_ref(&self) -> &Self {
         self
@@ -1917,55 +2086,15 @@ where
 //     }
 // }
 
-// QuickCheck
-
-#[cfg(all(feature = "arc", any(test, feature = "quickcheck")))]
-use quickcheck::{Arbitrary, Gen};
-
-#[cfg(all(feature = "arc", any(test, feature = "quickcheck")))]
-impl<K: Hash + Eq + Arbitrary + Sync, V: Arbitrary + Sync> Arbitrary for HashMap<K, V> {
-    fn arbitrary<G: Gen>(g: &mut G) -> Self {
-        HashMap::from(Vec::<(K, V)>::arbitrary(g))
-    }
-}
-
 // Proptest
-
 #[cfg(any(test, feature = "proptest"))]
+#[doc(hidden)]
 pub mod proptest {
-    use super::*;
-    use ::proptest::strategy::{BoxedStrategy, Strategy, ValueTree};
-    use std::ops::Range;
-
-    /// A strategy for a hash map of a given size.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// proptest! {
-    ///     #[test]
-    ///     fn proptest_works(ref m in hash_map(0..9999, ".*", 10..100)) {
-    ///         assert!(m.len() < 100);
-    ///         assert!(m.len() >= 10);
-    ///     }
-    /// }
-    /// ```
-    pub fn hash_map<K: Strategy + 'static, V: Strategy + 'static>(
-        key: K,
-        value: V,
-        size: Range<usize>,
-    ) -> BoxedStrategy<HashMap<<K::Tree as ValueTree>::Value, <V::Tree as ValueTree>::Value>>
-    where
-        <K::Tree as ValueTree>::Value: Hash + Eq + Clone,
-        <V::Tree as ValueTree>::Value: Clone,
-    {
-        ::proptest::collection::vec((key, value), size.clone())
-            .prop_map(HashMap::from)
-            .prop_filter("Map minimum size".to_owned(), move |m| {
-                m.len() >= size.start
-            })
-            .boxed()
-    }
+    #[deprecated(
+        since = "14.3.0",
+        note = "proptest strategies have moved to im::proptest"
+    )]
+    pub use crate::proptest::hash_map;
 }
 
 // Tests
@@ -2006,13 +2135,13 @@ mod test {
     #[test]
     fn remove_failing() {
         let pairs = [(1469, 0), (-67, 0)];
-        let hasher: BuildHasherDefault<LolHasher> = Default::default();
         let mut m: collections::HashMap<i16, i16, _> =
-            collections::HashMap::with_hasher(hasher.clone());
+            collections::HashMap::with_hasher(BuildHasherDefault::<LolHasher>::default());
         for &(ref k, ref v) in &pairs {
             m.insert(*k, *v);
         }
-        let mut map: HashMap<i16, i16, _> = HashMap::with_hasher(hasher);
+        let mut map: HashMap<i16, i16, _> =
+            HashMap::with_hasher(BuildHasherDefault::<LolHasher>::default());
         for (k, v) in &m {
             map = map.update(*k, *v);
         }
@@ -2084,6 +2213,11 @@ mod test {
     }
 
     #[test]
+    fn refpool_crash() {
+        let _map = HashMap::<u128, usize>::new();
+    }
+
+    #[test]
     fn large_map() {
         let mut map = HashMap::new();
         let size = 32769;
@@ -2137,13 +2271,12 @@ mod test {
 
         #[test]
         fn without(ref pairs in collection::vec((i16::ANY, i16::ANY), 0..100)) {
-            let hasher: BuildHasherDefault<LolHasher> = Default::default();
             let mut m: collections::HashMap<i16, i16, _> =
-                collections::HashMap::with_hasher(hasher.clone());
+                collections::HashMap::with_hasher(BuildHasherDefault::<LolHasher>::default());
             for &(ref k, ref v) in pairs {
                 m.insert(*k, *v);
             }
-            let mut map: HashMap<i16, i16, _> = HashMap::with_hasher(hasher);
+            let mut map: HashMap<i16, i16, _> = HashMap::with_hasher(BuildHasherDefault::<LolHasher>::default());
             for (k, v) in &m {
                 map = map.update(*k, *v);
             }
@@ -2171,13 +2304,12 @@ mod test {
 
         #[test]
         fn remove(ref pairs in collection::vec((i16::ANY, i16::ANY), 0..100)) {
-            let hasher: BuildHasherDefault<LolHasher> = Default::default();
             let mut m: collections::HashMap<i16, i16, _> =
-                collections::HashMap::with_hasher(hasher.clone());
+                collections::HashMap::with_hasher(BuildHasherDefault::<LolHasher>::default());
             for &(ref k, ref v) in pairs {
                 m.insert(*k, *v);
             }
-            let mut map: HashMap<i16, i16, _> = HashMap::with_hasher(hasher);
+            let mut map: HashMap<i16, i16, _> = HashMap::with_hasher(BuildHasherDefault::<LolHasher>::default());
             for (k, v) in &m {
                 map.insert(*k, *v);
             }

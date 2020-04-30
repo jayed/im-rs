@@ -47,7 +47,7 @@
 //!
 //! Another goal of this library has been the idea that you shouldn't
 //! even have to think about what data structure to use in any given
-//! situation, until the point where you need to start worring about
+//! situation, until the point where you need to start worrying about
 //! optimisation - which, in practice, often never comes. Beyond the
 //! shape of your data (ie. whether to use a list or a map), it should
 //! be fine not to think too carefully about data structures - you can
@@ -220,8 +220,8 @@
 //! if there's always another kind of list that's better at something.
 //!
 //! | Type | Algorithm | Constraints | Order | Push | Pop | Split | Append | Lookup |
-//! | --- | --- | --- | --- | --- | --- | --- |
-//! | [`Vector<A>`][vector::Vector] | [RRB tree][rrb-tree] | [`Clone`][std::clone::Clone] | insertion | O(1)* | O(1)* | O(log n) | O(log n) | O(log n) |
+//! | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+//! | [`Vector<A>`][vector::Vector] | [RRB tree][rrb-tree] | [`Clone`][std::clone::Clone] | insertion | O(1)\* | O(1)\* | O(log n) | O(log n) | O(log n) |
 //!
 //! ### Maps
 //!
@@ -232,7 +232,7 @@
 //! overwrite the previous value.
 //!
 //! | Type | Algorithm | Key Constraints | Order | Insert | Remove | Lookup |
-//! | --- | --- | --- | --- | --- | --- |
+//! | --- | --- | --- | --- | --- | --- | --- |
 //! | [`HashMap<K, V>`][hashmap::HashMap] | [HAMT][hamt] | [`Clone`][std::clone::Clone] + [`Hash`][std::hash::Hash] + [`Eq`][std::cmp::Eq] | undefined | O(log n) | O(log n) | O(log n) |
 //! | [`OrdMap<K, V>`][ordmap::OrdMap] | [B-tree][b-tree] | [`Clone`][std::clone::Clone] + [`Ord`][std::cmp::Ord] | sorted | O(log n) | O(log n) | O(log n) |
 //!
@@ -243,7 +243,7 @@
 //! only exist once in a given set.
 //!
 //! | Type | Algorithm | Constraints | Order | Insert | Remove | Lookup |
-//! | --- | --- | --- | --- | --- | --- |
+//! | --- | --- | --- | --- | --- | --- | --- |
 //! | [`HashSet<A>`][hashset::HashSet] | [HAMT][hamt] | [`Clone`][std::clone::Clone] + [`Hash`][std::hash::Hash] + [`Eq`][std::cmp::Eq] | undefined | O(log n) | O(log n) | O(log n) |
 //! | [`OrdSet<A>`][ordset::OrdSet] | [B-tree][b-tree] | [`Clone`][std::clone::Clone] + [`Ord`][std::cmp::Ord] | sorted | O(log n) | O(log n) | O(log n) |
 //!
@@ -303,10 +303,12 @@
 //!
 //! | Feature | Description |
 //! | ------- | ----------- |
+//! | [`pool`](https://crates.io/crates/refpool) | Constructors and pool types for [`refpool`](https://crates.io/crates/refpool) memory pools (only available in `im-rc`) |
 //! | [`proptest`](https://crates.io/crates/proptest) | Strategies for all `im` datatypes under a `proptest` namespace, eg. `im::vector::proptest::vector()` |
-//! | [`quickcheck`](https://crates.io/crates/quickcheck) | `Arbitrary` implementations for all `im` datatypes (not available in `im-rc`) |
-//! | [`rayon`](https://crates.io/crates/rayon) | parallel iterator implementations for `Vector` (not available in `im-rc`) |
-//! | [`serde`](https://crates.io/crates/serde) | `Serialize` and `Deserialize` implementations for all `im` datatypes |
+//! | [`quickcheck`](https://crates.io/crates/quickcheck) | [`quickcheck::Arbitrary`](https://docs.rs/quickcheck/latest/quickcheck/trait.Arbitrary.html) implementations for all `im` datatypes (not available in `im-rc`) |
+//! | [`rayon`](https://crates.io/crates/rayon) | parallel iterator implementations for [`Vector`][vector::Vector] (not available in `im-rc`) |
+//! | [`serde`](https://crates.io/crates/serde) | [`Serialize`](https://docs.rs/serde/latest/serde/trait.Serialize.html) and [`Deserialize`](https://docs.rs/serde/latest/serde/trait.Deserialize.html) implementations for all `im` datatypes |
+//! | [`arbitrary`](https://crates.io/crates/arbitrary/) | [`arbitrary::Arbitrary`](https://docs.rs/arbitrary/latest/arbitrary/trait.Arbitrary.html) implementations for all `im` datatypes |
 //!
 //! [std::collections]: https://doc.rust-lang.org/std/collections/index.html
 //! [std::collections::VecDeque]: https://doc.rust-lang.org/std/collections/struct.VecDeque.html
@@ -333,9 +335,10 @@
 //! [b-tree]: https://en.wikipedia.org/wiki/B-tree
 //! [cons-list]: https://en.wikipedia.org/wiki/Cons#Lists
 
-#![deny(unsafe_code)]
+#![forbid(rust_2018_idioms)]
+#![deny(unsafe_code, nonstandard_style)]
+#![warn(unreachable_pub, missing_docs)]
 #![cfg_attr(has_specialisation, feature(specialization))]
-#![cfg_attr(docs_rs_workaround, feature(slice_get_slice))]
 
 #[cfg(test)]
 #[macro_use]
@@ -345,6 +348,8 @@ mod config;
 mod nodes;
 mod sort;
 mod sync;
+
+#[macro_use]
 mod util;
 
 #[macro_use]
@@ -362,11 +367,28 @@ pub mod vector;
 
 pub mod iter;
 
+#[cfg(any(test, feature = "proptest"))]
+pub mod proptest;
+
 #[cfg(any(test, feature = "serde"))]
+#[doc(hidden)]
 pub mod ser;
 
-#[deprecated(since = "12.3.1", note = "please use the `sized_chunks` crate instead")]
-pub use sized_chunks::sized_chunk as chunk;
+#[cfg(feature = "arbitrary")]
+#[doc(hidden)]
+pub mod arbitrary;
+
+#[cfg(all(threadsafe, feature = "quickcheck"))]
+#[doc(hidden)]
+pub mod quickcheck;
+
+#[cfg(any(threadsafe, not(feature = "pool")))]
+mod fakepool;
+
+#[cfg(all(threadsafe, feature = "pool"))]
+compile_error!(
+    "The `pool` feature is not threadsafe but you've enabled it on a threadsafe version of `im`."
+);
 
 pub use crate::hashmap::HashMap;
 pub use crate::hashset::HashSet;
@@ -377,6 +399,9 @@ pub use crate::vector::Vector;
 
 #[cfg(test)]
 mod test;
+
+#[cfg(test)]
+mod tests;
 
 /// Update a value inside multiple levels of data structures.
 ///

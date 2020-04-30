@@ -4,4 +4,4 @@
 #
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
-xs 3956050500 706730731 3245945489 2502775722 # shrinks to ref vec1 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], ref vec2 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+cc d2977c225bfd8d461dea19c554cae04a48f9155854b53118264fb27b2dab49cb # shrinks to max = 1
